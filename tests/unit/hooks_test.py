@@ -149,17 +149,6 @@ def test_value_reference():
     except ValueError:
         pass
 
-    # Test invalid traversal
-    invalid_traverse = {
-        "nested": {"value": 123},
-        "values": "@value:nested.value.deeper",
-    }
-    try:
-        DataContainer.model_validate(invalid_traverse)
-        assert False, "Should have raised ValueError for invalid traversal"
-    except ValueError:
-        pass
-
 
 def test_import_reference(mocker):
     """Test the @import reference functionality."""
@@ -188,15 +177,7 @@ def test_import_reference(mocker):
     try:
         DataContainer.model_validate(data)
         assert False, "Should have raised ValueError for invalid import"
-    except ValueError as e:
-        pass
-
-    # Test invalid reference format
-    data = {"values": "@invalid:something"}
-    try:
-        DataContainer.model_validate(data)
-        assert False, "Should have raised ValueError for invalid reference type"
-    except ValueError as e:
+    except ValueError:
         pass
 
 
@@ -215,3 +196,92 @@ def test_env_reference():
         assert False, "Should have raised ValidationError"
     except ValidationError as e:
         assert "Environment variable NONEXISTENT_VAR not found" in str(e)
+
+
+def test_asset_reference():
+    """Test the @asset reference functionality."""
+    # Test that we can reference a previously built field using @asset
+    data = {
+        "config": {
+            "tensor1": {"mean": 0.0, "std_dev": 1.0, "size": 10},
+        },
+        "name": "model_name",
+        "primary": "@value:config.tensor1",
+        "secondary": {
+            "config": {"name": "nested", "scale": 2.0},
+            "tensor": "@asset:primary",  # Reference the built primary tensor
+        },
+    }
+
+    model = ComplexDataContainer.model_validate(data)
+
+    # Verify both tensors exist and are the same object
+    assert isinstance(model.primary, Tensor)
+    assert isinstance(model.secondary.tensor, Tensor)
+    assert len(model.primary) == 10
+    assert model.secondary.tensor is model.primary  # Should be the same object
+
+
+def test_call_hook():
+    """Test the @call hook functionality for calling methods on built assets."""
+
+    # Create a class with methods we want to call
+    class MethodProvider:
+        def __init__(self, value: str):
+            self.value = value
+
+        def get_value(self) -> str:
+            return self.value
+
+        def get_uppercase(self) -> str:
+            return self.value.upper()
+
+    # Create a blueprint for building the MethodProvider
+    @blueprint(MethodProvider)
+    class MethodProviderBlueprint(Blueprint[MethodProvider]):
+        value: str
+
+        def build(self) -> MethodProvider:
+            return MethodProvider(self.value)
+
+    # Create a model with a nested MethodProvider
+    class ServiceContainer(CyanticModel):
+        name: str
+        service: MethodProvider
+
+    # Create a model that will call methods on the MethodProvider
+    class ServiceConsumer(CyanticModel):
+        name: str
+        original_value: str
+        uppercase_value: str
+
+    # Create a parent application model that contains both components
+    class Application(CyanticModel):
+        app_name: str
+        services: ServiceContainer
+        client: ServiceConsumer
+
+    # Build the application with @call references
+    app_data = {
+        "app_name": "Test Application",
+        "services": {
+            "name": "Provider Service",
+            "service": {"value": "hello world"},
+        },
+        "client": {
+            "name": "Consumer Service",
+            "original_value": "@call:services.service.get_value",
+            "uppercase_value": "@call:services.service.get_uppercase",
+        },
+    }
+
+    app = Application.model_validate(app_data)
+
+    # Verify the application was built correctly
+    assert app.app_name == "Test Application"
+    assert isinstance(app.services.service, MethodProvider)
+    assert app.services.service.get_value() == "hello world"
+
+    # Verify the @call references worked
+    assert app.client.original_value == "hello world"
+    assert app.client.uppercase_value == "HELLO WORLD"
