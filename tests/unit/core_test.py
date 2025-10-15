@@ -1,7 +1,7 @@
 import pytest
 import random
 import statistics
-from typing import Any, Sequence, Union, overload
+from typing import Sequence, Union, overload
 
 from pydantic import BaseModel, Field
 
@@ -63,23 +63,6 @@ class Tensor(BaseModel):
         if not isinstance(other, Tensor):
             return NotImplemented
         return self.data == other.data
-
-
-@blueprint(object)
-class Classifier(Blueprint[Any]):
-    """Blueprint for creating a class"""
-
-    cls: str
-    kwargs: dict[str, Any] = Field(default_factory=dict)
-
-    def build(self) -> Any:
-        module_path, class_name = self.cls.rsplit(".", 1)
-        module = __import__(module_path, fromlist=[class_name])
-        cls = getattr(module, class_name)
-        print(cls)
-        foo = cls(**self.kwargs)
-        print(type(foo))
-        return foo
 
 
 @blueprint(Tensor)

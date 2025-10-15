@@ -160,6 +160,11 @@ class BlueprintRegistry:
         should use normal Pydantic validation for dict inputs.
         """
         type_specific = cls._blueprints.get(target_type, [])
+
+        # If we're already looking up object, don't add fallback (would be duplicate)
+        if target_type is object:
+            return type_specific
+
         fallback = cls._blueprints.get(object, [])
 
         # Don't apply object blueprints to Pydantic models (BaseModel or CyanticModel)
