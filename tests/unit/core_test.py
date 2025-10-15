@@ -93,6 +93,16 @@ class UniformTensor(Blueprint[Tensor]):
         )
 
 
+@blueprint(Tensor)
+class ScalarTensor(Blueprint[Tensor]):
+    """Blueprint for creating a single-element tensor from a scalar value."""
+
+    value: float
+
+    def build(self) -> Tensor:
+        return Tensor(data=[self.value])
+
+
 class DataContainer(CyanticModel):
     """Example model using cast-enabled tensor."""
 
@@ -113,6 +123,19 @@ def test_cast_build():
     assert len(model2.values) == 10
     assert isinstance(model2.values, Tensor)
     assert all(isinstance(x, float) for x in model2.values.data)
+
+    # Test scalar blueprint - int scalar
+    scalar_int = {"values": 5}
+    model3 = DataContainer.model_validate(scalar_int)
+    assert len(model3.values) == 1
+    assert isinstance(model3.values, Tensor)
+    assert model3.values.data == [5.0]
+
+    # Test scalar blueprint - float scalar
+    scalar_float = {"values": 3.14}
+    model4 = DataContainer.model_validate(scalar_float)
+    assert len(model4.values) == 1
+    assert model4.values.data == [3.14]
 
     # Test validation error for missing required fields
     try:

@@ -362,7 +362,7 @@ class CyanticModel(BaseModel):
                                         )
                                     )
                         elif isinstance(field_value, dict):
-                            # Handle direct blueprint types
+                            # Handle direct blueprint types with dict input
                             try:
                                 field_value = v[field_name] = cls.try_build(
                                     field_type, field_value
@@ -371,6 +371,16 @@ class CyanticModel(BaseModel):
                                 raise ValueError(
                                     f"Error building {field_name}: {str(e)}"
                                 )
+                        elif BlueprintRegistry.get_blueprints(field_type):
+                            # Handle scalar blueprint types (non-dict input)
+                            # Wrap the scalar value as {"value": <scalar>} and try building
+                            try:
+                                field_value = v[field_name] = cls.try_build(
+                                    field_type, {"value": field_value}
+                                )
+                            except ValueError:
+                                # No blueprint matched the wrapped scalar, let Pydantic handle it
+                                pass
 
                     # Step 3: Process after hooks (@call, @asset)
                     if isinstance(field_value, str) and field_value.startswith("@"):
