@@ -151,8 +151,27 @@ class BlueprintRegistry:
 
     @classmethod
     def get_blueprints(cls, target_type: type) -> list[type["Blueprint"]]:
-        """Get all registered blueprints for a type."""
-        return cls._blueprints.get(target_type, [])
+        """Get all registered blueprints for a type.
+
+        Returns type-specific blueprints first, then falls back to blueprints
+        registered for `object` (which apply to all types).
+
+        Note: CyanticModel subclasses don't get the object fallback, since they
+        should use normal Pydantic validation for dict inputs.
+        """
+        type_specific = cls._blueprints.get(target_type, [])
+        fallback = cls._blueprints.get(object, [])
+
+        # Don't apply object blueprints to Pydantic models (BaseModel or CyanticModel)
+        # They should be validated normally by Pydantic
+        try:
+            if issubclass(target_type, BaseModel):
+                return type_specific
+        except TypeError:
+            # target_type might not be a class (e.g., typing constructs)
+            pass
+
+        return type_specific + fallback
 
 
 def blueprint(target_type: type):

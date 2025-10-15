@@ -91,8 +91,6 @@ def asset(path: str, ctx: ValidationContext) -> Any:
 @hook("call", before=False)
 def call(path: str, ctx: ValidationContext) -> Any:
     """Handle @call:path.method references with elegant navigation."""
-    current_context = ctx.get_current_path()
-
     from .context import navigate_path
 
     # For @call:services.service.get_value, we need to:

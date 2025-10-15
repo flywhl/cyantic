@@ -1,7 +1,7 @@
 import pytest
 import random
 import statistics
-from typing import Sequence, Union, overload
+from typing import Any, Sequence, Union, overload
 
 from pydantic import BaseModel, Field
 
@@ -63,6 +63,23 @@ class Tensor(BaseModel):
         if not isinstance(other, Tensor):
             return NotImplemented
         return self.data == other.data
+
+
+@blueprint(object)
+class Classifier(Blueprint[Any]):
+    """Blueprint for creating a class"""
+
+    cls: str
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+
+    def build(self) -> Any:
+        module_path, class_name = self.cls.rsplit(".", 1)
+        module = __import__(module_path, fromlist=[class_name])
+        cls = getattr(module, class_name)
+        print(cls)
+        foo = cls(**self.kwargs)
+        print(type(foo))
+        return foo
 
 
 @blueprint(Tensor)
@@ -389,3 +406,32 @@ def test_cyanticmodel_in_basemodel():
         assert False, "Should have raised ValueError for negative size"
     except ValueError:
         pass
+
+
+class ArbitraryClass:
+    """A simple class for testing the Classifier blueprint."""
+
+    def __init__(self, name: str, value: int):
+        self.name = name
+        self.value = value
+
+
+class ClassifierContainer(CyanticModel):
+    """Container for testing Classifier blueprint."""
+
+    obj: ArbitraryClass
+
+
+def test_classifier_blueprint():
+    """Test the Classifier blueprint registered for object type."""
+    data = {
+        "obj": {
+            "cls": "core_test.ArbitraryClass",  # Use pytest's relative module path
+            "kwargs": {"name": "test", "value": 42},
+        }
+    }
+
+    model = ClassifierContainer.model_validate(data)
+    assert isinstance(model.obj, ArbitraryClass)
+    assert model.obj.name == "test"
+    assert model.obj.value == 42
