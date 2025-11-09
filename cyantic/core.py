@@ -12,7 +12,7 @@ This module implements a bottom-up build strategy:
 import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Any, Generic, Type, TypeVar, get_type_hints
+from typing import Any, Generic, Type, TypeVar, get_type_hints, get_origin, get_args
 from typing_extensions import Self
 
 from pydantic import BaseModel, ConfigDict
@@ -77,6 +77,63 @@ def blueprint(target_type: type):
     return decorator
 
 
+def get_container_value_type(field_type: Type) -> Type | None:
+    """Extract the value type from a container type annotation.
+
+    Args:
+        field_type: Type annotation like dict[str, Foo], list[Bar], etc.
+
+    Returns:
+        The value type (Foo, Bar, etc.) or None if not a recognized container
+    """
+    origin = get_origin(field_type)
+    args = get_args(field_type)
+
+    if origin is None or not args:
+        return None
+
+    # dict[K, V] -> return V (last arg)
+    if origin is dict:
+        return args[-1] if args else None
+
+    # list[T], set[T], tuple[T, ...] -> return T (first arg)
+    if origin in (list, set, tuple):
+        return args[0] if args else None
+
+    return None
+
+
+def is_buildable_type(target_type: Type) -> bool:
+    """Check if a type needs building (has blueprints or is a CyanticModel).
+
+    Args:
+        target_type: The type to check
+
+    Returns:
+        True if this type should be discovered and built
+    """
+    # Unwrap generics
+    raw_type = get_origin(target_type) if get_origin(target_type) else target_type
+
+    # If raw_type is None or not a type, it's not buildable
+    if not isinstance(raw_type, type):
+        return False
+
+    # Skip plain container types
+    if raw_type in (dict, list, tuple, set):
+        return False
+
+    # Check if it has blueprints
+    if BlueprintRegistry.get_blueprints(raw_type):
+        return True
+
+    # Check if it's a CyanticModel or BaseModel subclass
+    if issubclass(raw_type, (BaseModel, CyanticModel)):
+        return True
+
+    return False
+
+
 @dataclass
 class BuildNode:
     """Represents a node in the config tree that needs to be built."""
@@ -120,6 +177,75 @@ class Blueprint(BaseModel, Generic[T]):
         raise NotImplementedError
 
 
+def discover_in_container(
+    container_config: Any,
+    value_type: Type,
+    container_path: str,
+    parent_path: str,
+) -> list[BuildNode]:
+    """Discover buildable nodes within a container (dict, list, etc.).
+
+    Args:
+        container_config: The container data (dict or list)
+        value_type: The type of values in the container
+        container_path: Path to the container field
+        parent_path: Parent path for the container
+
+    Returns:
+        List of discovered nodes within the container
+    """
+    nodes = []
+
+    # Check if value_type is itself a container with buildable values
+    # This handles cases like dict[str, dict[str, Foo]]
+    nested_value_type = get_container_value_type(value_type)
+
+    if nested_value_type and is_buildable_type(nested_value_type):
+        # Value type is a container - need to recurse into nested containers
+        # Pass nested_value_type (not value_type) to discover the actual buildable nodes
+        if isinstance(container_config, dict):
+            for key, value_config in container_config.items():
+                value_path = f"{container_path}.{key}"
+                # Recurse into the nested container with nested_value_type
+                # so we eventually reach the buildable nodes
+                nested_nodes = discover_in_container(
+                    value_config, nested_value_type, value_path, parent_path
+                )
+                nodes.extend(nested_nodes)
+        elif isinstance(container_config, (list, tuple)):
+            for idx, item_config in enumerate(container_config):
+                item_path = f"{container_path}.{idx}"
+                # Recurse into the nested container with nested_value_type
+                # so we eventually reach the buildable nodes
+                nested_nodes = discover_in_container(
+                    item_config, nested_value_type, item_path, parent_path
+                )
+                nodes.extend(nested_nodes)
+    else:
+        # Value type is buildable (not a container) - discover normally
+        if isinstance(container_config, dict):
+            # For dict[K, V], discover nodes in each value
+            for key, value_config in container_config.items():
+                value_path = f"{container_path}.{key}"
+                value_nodes = discover_buildable_nodes(
+                    value_config, value_type, value_path, parent_path
+                )
+                nodes.extend(value_nodes)
+
+        elif isinstance(container_config, (list, tuple)):
+            # For list[T], discover nodes in each item
+            for idx, item_config in enumerate(container_config):
+                item_path = f"{container_path}.{idx}"
+                item_nodes = discover_buildable_nodes(
+                    item_config, value_type, item_path, parent_path
+                )
+                nodes.extend(item_nodes)
+
+    # Note: set not supported for now since we can't preserve order/index
+
+    return nodes
+
+
 def discover_buildable_nodes(
     config: Any, target_type: Type, path: str = "", parent_path: str = ""
 ) -> list[BuildNode]:
@@ -161,7 +287,12 @@ def discover_buildable_nodes(
         # Try to get type hints to discover nested buildable fields
         try:
             if issubclass(raw_type, BaseModel):
-                hints = get_type_hints(raw_type)
+                try:
+                    hints = get_type_hints(raw_type)
+                except NameError:
+                    # Forward reference that can't be resolved (e.g., self-referential types
+                    # defined in local scope). Skip field discovery for this type.
+                    hints = {}
 
                 # Discover buildable fields recursively
                 for field_name, field_type in hints.items():
@@ -171,11 +302,32 @@ def discover_buildable_nodes(
                     field_config = config[field_name]
                     field_path = f"{path}.{field_name}" if path else field_name
 
-                    # Recursively discover nodes in this field
-                    child_nodes = discover_buildable_nodes(
-                        field_config, field_type, field_path, path
-                    )
-                    nodes.extend(child_nodes)
+                    # Check if field_type is a container with buildable values
+                    value_type = get_container_value_type(field_type)
+
+                    if value_type:
+                        # This is a container - check if its values are buildable
+                        # OR if it's a nested container (like dict[str, dict[str, Foo]])
+                        nested_value_type = get_container_value_type(value_type)
+
+                        if is_buildable_type(value_type) or (
+                            nested_value_type and is_buildable_type(nested_value_type)
+                        ):
+                            # Container with buildable values (possibly nested)
+                            # Recursively discover within the container
+                            container_nodes = discover_in_container(
+                                field_config, value_type, field_path, path
+                            )
+                            nodes.extend(container_nodes)
+                        else:
+                            # Container but values not buildable - skip
+                            pass
+                    else:
+                        # Not a container - regular field, recursively discover nodes
+                        child_nodes = discover_buildable_nodes(
+                            field_config, field_type, field_path, path
+                        )
+                        nodes.extend(child_nodes)
         except (TypeError, AttributeError):
             # Not a class or doesn't have type hints
             pass
@@ -404,6 +556,84 @@ def process_hooks(
         return config
 
 
+def reconstruct_nested_value(
+    path_parts: list[str],
+    value: Any,
+    root_config: dict[str, Any],
+    current_result: dict[str, Any] | list[Any],
+) -> None:
+    """Recursively reconstruct nested container structure.
+
+    Args:
+        path_parts: Remaining path parts (e.g., ['ff_dendrites', 'e', 'stimulus'])
+        value: The value to place at the end of the path
+        root_config: Original config to determine container types
+        current_result: Current reconstruction target (modified in place)
+    """
+    if len(path_parts) == 1:
+        # Base case: direct assignment
+        key = path_parts[0]
+        if isinstance(current_result, list):
+            # For lists, the key should be an index - just append
+            current_result.append(value)
+        else:
+            # For dicts, use the key directly
+            current_result[key] = value
+        return
+
+    # Recursive case: need to go deeper
+    field_name = path_parts[0]
+    remaining_parts = path_parts[1:]
+
+    if isinstance(current_result, list):
+        # Current level is a list - field_name should be an index
+        # This shouldn't happen in typical usage but handle it gracefully
+        idx = int(field_name)
+        # Extend list if needed
+        while len(current_result) <= idx:
+            current_result.append({})
+        # Recurse into the list element
+        reconstruct_nested_value(
+            remaining_parts, value, root_config, current_result[idx]
+        )
+    else:
+        # Current level is a dict
+        # Initialize the field if it doesn't exist
+        if field_name not in current_result:
+            # Check the config to determine what type of container to create
+            # Walk down the config following the path
+            config_value = root_config
+            for part in path_parts[: len(path_parts) - len(remaining_parts)]:
+                if isinstance(config_value, dict) and part in config_value:
+                    config_value = config_value[part]
+                elif isinstance(config_value, list):
+                    # Try to convert part to int for list indexing
+                    try:
+                        idx = int(part)
+                        if idx < len(config_value):
+                            config_value = config_value[idx]
+                        else:
+                            config_value = {}
+                            break
+                    except (ValueError, IndexError):
+                        config_value = {}
+                        break
+                else:
+                    config_value = {}
+                    break
+
+            # Determine container type from config
+            if isinstance(config_value, list):
+                current_result[field_name] = []
+            else:
+                current_result[field_name] = {}
+
+        # Recurse into the nested structure
+        reconstruct_nested_value(
+            remaining_parts, value, root_config, current_result[field_name]
+        )
+
+
 def build_node(
     node: BuildNode,
     built_assets: dict[str, Any],
@@ -432,12 +662,31 @@ def build_node(
         # Find children nodes (nodes whose parent_path is this node's path)
         children = [n for n in all_nodes if n.parent_path == node.path]
 
-        # Build dict from built children
+        # Build dict from built children, reconstructing containers
         assembled = {}
         built_field_names = set()
+
         for child in children:
-            assembled[child.field_name] = built_assets[child.path]
-            built_field_names.add(child.field_name)
+            # Get relative path from this node to the child
+            path_parts = child.path.split(".")
+            parent_parts = node.path.split(".") if node.path else []
+            relative_parts = (
+                path_parts[len(parent_parts) :] if parent_parts else path_parts
+            )
+
+            if len(relative_parts) == 1:
+                # Direct child - simple assignment
+                assembled[relative_parts[0]] = built_assets[child.path]
+                built_field_names.add(relative_parts[0])
+            else:
+                # Nested child - need to recursively reconstruct container structure
+                reconstruct_nested_value(
+                    relative_parts,
+                    built_assets[child.path],
+                    node.config,
+                    assembled,
+                )
+                built_field_names.add(relative_parts[0])
 
         # Also include non-built fields from config (primitives, etc.)
         if isinstance(node.config, dict):
@@ -569,19 +818,35 @@ def build(target_type: Type[CyanticModelT], config: dict) -> CyanticModelT:
         built_assets[node.path] = built_obj
         logger.debug(f"  -> {type(built_obj).__name__}")
 
-    # 5. Assemble nested structure - start with all config fields
-    assembled = {}
-    built_field_names = {
-        node.field_name for node in sorted_nodes if not node.parent_path
-    }
+    # 5. Assemble nested structure from built nodes
+    # Get all root-level nodes (nodes whose parent_path is "")
+    root_nodes = [node for node in sorted_nodes if not node.parent_path]
 
-    # Add all config fields, processing hooks in non-built fields
-    for field_name, field_value in config.items():
-        if field_name in built_field_names:
-            # Use the built version
-            assembled[field_name] = built_assets[field_name]
+    assembled = {}
+    built_field_names = set()
+
+    for node in root_nodes:
+        # Check if this is a direct field or container item
+        path_parts = node.path.split(".")
+
+        if len(path_parts) == 1:
+            # Direct field - simple assignment
+            assembled[path_parts[0]] = built_assets[node.path]
+            built_field_names.add(path_parts[0])
         else:
-            # Process hooks in non-built fields (like plain dicts)
+            # Nested container item - use recursive reconstruction
+            reconstruct_nested_value(
+                path_parts,
+                built_assets[node.path],
+                config,
+                assembled,
+            )
+            built_field_names.add(path_parts[0])
+
+    # Add non-built fields from config (primitives, plain dicts, etc.)
+    for field_name, field_value in config.items():
+        if field_name not in built_field_names:
+            # Process hooks in non-built fields
             assembled[field_name] = process_hooks(
                 field_value, built_assets, root_data, field_name
             )

@@ -9,6 +9,8 @@ from cyantic.blueprints import classifier
 class Optimizer:
     """Mock optimizer base class."""
 
+    params: list[list[int]]
+
     def step(self):
         pass
 
@@ -114,6 +116,7 @@ def test_simple_build_with_call_hook():
     # Check types by name to avoid module import issues
     assert type(result.network).__name__ == "Network"
     assert type(result.optimizer).__name__ == "Adam"
+    # Type checker doesn't know optimizer is Adam, but we verified it above
     assert result.optimizer.params == [[1.0, 2.0, 3.0]]
 
 
