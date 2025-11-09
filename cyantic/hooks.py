@@ -1,158 +1,215 @@
+"""Hook system for Cyantic external build.
+
+Hooks allow references in config like @import:, @env:, @value:, @asset:, @call:
+to be resolved during the build process.
+"""
+
 import importlib
 import logging
 import os
 from typing import Any, Callable
-
-from pydantic import BaseModel
-
-from .context import ValidationContext
 
 logger = logging.getLogger(__name__)
 
 HOOK_PREFIX = "@"
 
 
-class Hook(BaseModel):
-    handler: Callable
-    before: bool
-
-
 class HookRegistry:
-    """Global registry mapping reference hooks to their handler functions."""
+    """Global registry for hooks."""
 
-    _hooks: dict[str, Hook] = {}
+    _hooks: dict[str, Callable] = {}
 
     @classmethod
-    def register(cls, name: str, handler: Callable, before: bool = False):
-        """Register a handler function for a reference hook."""
+    def register(cls, name: str, handler: Callable):
+        """Register a hook handler function."""
         if name in cls._hooks:
-            raise ValueError(f"Handler already registered for hook: {name}")
-
-        hook = Hook(handler=handler, before=before)
-        cls._hooks[name] = hook
-        logger.debug(f"Registered handler for hook: {hook}")
+            raise ValueError(f"Hook already registered: {name}")
+        cls._hooks[name] = handler
+        logger.debug(f"Registered hook: {name}")
 
     @classmethod
-    def get_hook(cls, name: str) -> Hook:
-        """Get the handler for a reference hook."""
+    def get(cls, name: str) -> Callable:
+        """Get a hook handler by name."""
         if name not in cls._hooks:
-            raise ValueError(f"No hook registered with name '{name}'")
+            raise ValueError(f"Unknown hook: @{name}:")
         return cls._hooks[name]
 
     @classmethod
+    def has(cls, name: str) -> bool:
+        """Check if a hook is registered."""
+        return name in cls._hooks
+
+    @classmethod
     def clear(cls):
-        """Clear all registered handlers."""
+        """Clear all registered hooks."""
         cls._hooks.clear()
 
 
-def hook(hook: str, *, before: bool):
-    """Decorator to register a reference hook handler function."""
+def hook(name: str):
+    """Decorator to register a hook handler function.
+
+    Example:
+        @hook("myvalue")
+        def my_custom_hook(path: str, built_assets: dict, root_data: dict, current_path: str = "") -> Any:
+            return root_data.get(path)
+    """
 
     def decorator(handler: Callable):
-        HookRegistry.register(hook, handler, before=before)
+        HookRegistry.register(name, handler)
         return handler
 
     return decorator
 
 
-# Implement built-in hooks
-@hook("import", before=True)
-def import_hook(path: str, _: ValidationContext) -> Any:
-    """Handle @import:module.path.to.thing references."""
+def navigate_path(obj: Any, path: str) -> Any:
+    """Navigate a path like 'a.b.c' using either dict keys or object attributes.
+
+    Args:
+        obj: The object to navigate
+        path: Dot-separated path
+
+    Returns:
+        The value at the path
+
+    Raises:
+        ValueError: If path cannot be navigated
+    """
+    if not path:
+        return obj
+
+    current = obj
+    for segment in path.split("."):
+        try:
+            # Try dict-style access first
+            if hasattr(current, "__getitem__"):
+                current = current[segment]
+            else:
+                # Fall back to attribute access
+                current = getattr(current, segment)
+        except (KeyError, AttributeError):
+            # Try the other way
+            try:
+                if hasattr(current, "__getitem__"):
+                    current = getattr(current, segment)
+                else:
+                    current = current[segment]
+            except (KeyError, AttributeError, TypeError):
+                raise ValueError(f"Cannot navigate to '{segment}' in path '{path}'")
+    return current
+
+
+# Built-in hooks
+
+
+@hook("import")
+def import_hook(
+    path: str,
+    built_assets: dict[str, Any],
+    root_data: dict[str, Any],
+    current_path: str = "",
+) -> Any:
+    """Handle @import:module.path.Class references.
+
+    Example: @import:torch.optim.Adam
+    """
     module_path, attr = path.rsplit(".", 1)
     try:
         module = importlib.import_module(module_path)
     except ImportError as e:
-        raise ValueError(path) from e
+        raise ValueError(f"Cannot import {path}") from e
     return getattr(module, attr)
 
 
-@hook("value", before=True)
-def value(path: str, context: ValidationContext) -> Any:
-    """Handle @value:path.to.value references."""
-    return context.get_nested_value(path)
+@hook("env")
+def env_hook(
+    path: str,
+    built_assets: dict[str, Any],
+    root_data: dict[str, Any],
+    current_path: str = "",
+) -> str:
+    """Handle @env:VARIABLE_NAME references.
 
-
-@hook("env", before=True)
-def env(name: str, _: ValidationContext) -> str:
-    """Handle @env:VARIABLE_NAME references."""
+    Example: @env:DATABASE_URL
+    """
     try:
-        return os.environ[name]
+        return os.environ[path]
     except KeyError as e:
-        raise ValueError(f"Environment variable {name} not found") from e
+        raise ValueError(f"Environment variable {path} not found") from e
 
 
-@hook("asset", before=False)
-def asset(path: str, ctx: ValidationContext) -> Any:
-    """Handle @asset:path references with elegant hierarchical resolution."""
-    return ctx.resolve_asset_reference(path)
+@hook("value")
+def value_hook(
+    path: str,
+    built_assets: dict[str, Any],
+    root_data: dict[str, Any],
+    current_path: str = "",
+) -> Any:
+    """Handle @value:path.to.value - reference original config values.
+
+    Example: @value:common.learning_rate
+    """
+    return navigate_path(root_data, path)
 
 
-@hook("call", before=False)
-def call(path: str, ctx: ValidationContext) -> Any:
-    """Handle @call:path.method references with elegant navigation."""
-    from .context import navigate_path
+@hook("asset")
+def asset_hook(
+    path: str,
+    built_assets: dict[str, Any],
+    root_data: dict[str, Any],
+    current_path: str = "",
+) -> Any:
+    """Handle @asset:path - reference built objects.
 
-    # For @call:services.service.get_value, we need to:
-    # 1. Find where in the hierarchy we can start navigating (e.g., application.services)
-    # 2. Navigate from there to the method (service.get_value)
-    # 3. Call the method
+    Example: @asset:services.database
+    """
+    if path not in built_assets:
+        raise ValueError(
+            f"No asset found for @asset:{path}. "
+            f"Available: {list(built_assets.keys())}"
+        )
+    return built_assets[path]
 
-    path_parts = path.split(".")
 
-    # Try to find a starting point in the asset hierarchy
-    # We'll try progressively longer prefixes until we find an asset
-    for i in range(1, len(path_parts) + 1):
-        prefix = ".".join(path_parts[:i])
+@hook("call")
+def call_hook(
+    path: str,
+    built_assets: dict[str, Any],
+    root_data: dict[str, Any],
+    current_path: str = "",
+) -> Any:
+    """Handle @call:path.method - call methods on built objects.
 
-        # Special case: if prefix is the full path, it means we're looking for a method on a direct asset
-        if i == len(path_parts) and i > 1:
-            # This is a method call like "error_raiser.raise_error"
-            asset_name = path_parts[0]
-            method_name = path_parts[-1]
+    Example: @call:network.parameters
+    """
+    parts = path.split(".")
 
-            try:
-                # Try to get the asset directly
-                asset = navigate_path(ctx._context.built_assets, asset_name)
-                method = getattr(asset, method_name)
-                if callable(method):
-                    try:
-                        return method()
-                    except Exception as e:
-                        raise ValueError(
-                            f"Error calling method '{path}': {str(e)}"
-                        ) from e
-                else:
-                    raise ValueError(f"'{path}' is not callable")
-            except (ValueError, AttributeError):
-                pass
+    # Try progressively longer prefixes to find the asset
+    asset = None
+    remaining_parts = []
 
-        # No need for model context anymore since we don't use model name prefix
+    for i in range(1, len(parts) + 1):
+        asset_path = ".".join(parts[:i])
+        if asset_path in built_assets:
+            asset = built_assets[asset_path]
+            remaining_parts = parts[i:]
+            break
 
-        # Try direct resolution without model context
+    if asset is None:
+        raise ValueError(
+            f"No asset found for @call:{path}. "
+            f"Available: {list(built_assets.keys())}"
+        )
+
+    # Navigate to the method
+    current = asset
+    for part in remaining_parts:
+        current = getattr(current, part)
+
+    # Call it
+    if callable(current):
         try:
-            asset = navigate_path(ctx._context.built_assets, prefix)
-
-            # Navigate the remaining path from this asset
-            remaining_parts = path_parts[i:]
-            current = asset
-            for part in remaining_parts:
-                current = getattr(current, part)
-
-            # Call if it's callable
-            if callable(current):
-                try:
-                    return current()
-                except Exception as e:
-                    raise ValueError(f"Error calling method '{path}': {str(e)}") from e
-            else:
-                raise ValueError(f"'{path}' is not callable")
-
-        except (ValueError, AttributeError):
-            pass
-
-    # If we get here, we couldn't resolve the path
-    available_keys = ctx._get_all_keys(ctx._context.built_assets)
-    raise ValueError(
-        f"No callable found at path '{path}'. Available assets: {available_keys}"
-    )
+            return current()
+        except Exception as e:
+            raise ValueError(f"Error calling {path}: {str(e)}") from e
+    else:
+        raise ValueError(f"'{path}' is not callable")

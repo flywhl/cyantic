@@ -1,7 +1,7 @@
 import os
 import random
 import statistics
-from typing import Sequence, Union, overload
+from typing import Any, Sequence, Union, overload
 from pydantic import BaseModel, Field, ValidationError
 
 from cyantic import Blueprint, blueprint, CyanticModel
@@ -117,7 +117,7 @@ def test_value_reference():
         "values": "@value:stuff.tensor",
     }
 
-    model = DataContainer.model_validate(data)
+    model = DataContainer.build(data)
     assert isinstance(model.values, Tensor)
     assert len(model.values) == 50
 
@@ -137,14 +137,14 @@ def test_value_reference():
         },
     }
 
-    model = ComplexDataContainer.model_validate(nested_data)
+    model = ComplexDataContainer.build(nested_data)
     assert len(model.primary) == 30
     assert len(model.secondary.tensor) == 20
 
     # Test invalid path
     invalid_data = {"values": "@value:nonexistent.path"}
     try:
-        DataContainer.model_validate(invalid_data)
+        DataContainer.build(invalid_data)
         assert False, "Should have raised ValueError for invalid path"
     except ValueError:
         pass
@@ -168,14 +168,14 @@ def test_import_reference(mocker):
 
     # Test successful import
     data = {"values": "@import:test.module.test_value"}
-    model = DataContainer.model_validate(data)
+    model = DataContainer.build(data)
     assert isinstance(model.values, Tensor)
     assert model.values.data == [1.0, 2.0, 3.0]
 
     # Test invalid module
     data = {"values": "@import:nonexistent.module.value"}
     try:
-        DataContainer.model_validate(data)
+        DataContainer.build(data)
         assert False, "Should have raised ValueError for invalid import"
     except ValueError:
         pass
@@ -186,15 +186,15 @@ def test_env_reference():
     # Test successful env var reference
     os.environ["TEST_VAR"] = "test_value"
     data = {"name": "@env:TEST_VAR"}
-    model = SimpleModel.model_validate(data)
+    model = SimpleModel.build(data)
     assert model.name == "test_value"
 
     # Test missing env var raises ValidationError
     data = {"name": "@env:NONEXISTENT_VAR"}
     try:
-        SimpleModel.model_validate(data)
+        SimpleModel.build(data)
         assert False, "Should have raised ValidationError"
-    except ValidationError as e:
+    except ValueError as e:
         assert "Environment variable NONEXISTENT_VAR not found" in str(e)
 
 
@@ -213,7 +213,7 @@ def test_asset_reference():
         },
     }
 
-    model = ComplexDataContainer.model_validate(data)
+    model = ComplexDataContainer.build(data)
 
     # Verify both tensors exist and are the same object
     assert isinstance(model.primary, Tensor)
@@ -275,7 +275,7 @@ def test_call_hook():
         },
     }
 
-    app = Application.model_validate(app_data)
+    app = Application.build(app_data)
 
     # Verify the application was built correctly
     assert app.app_name == "Test Application"
@@ -285,3 +285,45 @@ def test_call_hook():
     # Verify the @call references worked
     assert app.client.original_value == "hello world"
     assert app.client.uppercase_value == "HELLO WORLD"
+
+
+def test_nested_dict_hooks():
+    """Test that hooks are processed in nested dict fields."""
+
+    class Service:
+        def __init__(self, name: str):
+            self.name = name
+
+        def get_name(self) -> str:
+            return self.name
+
+    @blueprint(Service)
+    class ServiceBlueprint(Blueprint[Service]):
+        name: str
+
+        def build(self) -> Service:
+            return Service(self.name)
+
+    class Config(CyanticModel):
+        service: Service
+        # Dict field with nested hooks
+        settings: dict[str, Any]
+
+    config_data = {
+        "service": {"name": "TestService"},
+        "settings": {
+            "service_name": "@call:service.get_name",
+            "nested": {
+                "also_name": "@call:service.get_name",
+            },
+            "in_list": ["@call:service.get_name", "static_value"],
+        },
+    }
+
+    config = Config.build(config_data)
+
+    # Verify nested hooks were processed
+    assert config.settings["service_name"] == "TestService"
+    assert config.settings["nested"]["also_name"] == "TestService"
+    assert config.settings["in_list"][0] == "TestService"
+    assert config.settings["in_list"][1] == "static_value"

@@ -1,36 +1,50 @@
 """Built-in blueprints for Cyantic."""
 
-from typing import Any
+from typing import Any, Type
 
 from pydantic import Field
 
 from .core import Blueprint, BlueprintRegistry
 
 
-class Classifier(Blueprint[Any]):
-    """Blueprint for creating a class from a module path and kwargs.
+def classifier(target_type: Type):
+    """Register a Classifier blueprint for the given type.
 
-    This is registered for `object` type, making it a fallback blueprint
-    for any non-Pydantic class.
+    This allows building instances from a dict with 'cls' and 'kwargs' keys.
+
+    Args:
+        target_type: The type to register the classifier for
 
     Example:
-        {
-            "cls": "my.module.MyClass",
-            "kwargs": {"arg1": "value1", "arg2": 42}
+        classifier(MyClass)
+
+        # Now you can build MyClass instances like:
+        config = {
+            "my_field": {
+                "cls": "my.module.MyClass",
+                "kwargs": {"arg1": "value1"}
+            }
         }
     """
 
-    cls: str
-    kwargs: dict[str, Any] = Field(default_factory=dict)
+    class Classifier(Blueprint[target_type]):
+        """Blueprint for creating a class from a module path and kwargs.
 
-    def build(self) -> Any:
-        """Import the class and instantiate it with kwargs."""
-        module_path, class_name = self.cls.rsplit(".", 1)
-        module = __import__(module_path, fromlist=[class_name])
-        target_class = getattr(module, class_name)
-        return target_class(**self.kwargs)
+        Example:
+            {
+                "cls": "my.module.MyClass",
+                "kwargs": {"arg1": "value1", "arg2": 42}
+            }
+        """
 
+        cls: str
+        kwargs: dict[str, Any] = Field(default_factory=dict)
 
-# Register Classifier as the first (and only) blueprint for object type
-# We do this manually instead of using @blueprint to ensure it's at index 0
-BlueprintRegistry.register(object, Classifier)
+        def build(self) -> Any:
+            """Import the class and instantiate it with kwargs."""
+            module_path, class_name = self.cls.rsplit(".", 1)
+            module = __import__(module_path, fromlist=[class_name])
+            target_class = getattr(module, class_name)
+            return target_class(**self.kwargs)
+
+    BlueprintRegistry.register(target_type, Classifier)

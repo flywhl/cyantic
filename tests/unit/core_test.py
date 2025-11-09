@@ -5,7 +5,7 @@ from typing import Sequence, Union, overload
 
 from pydantic import BaseModel, Field
 
-from cyantic import Blueprint, blueprint, CyanticModel
+from cyantic import Blueprint, blueprint, CyanticModel, classifier
 
 
 class SimpleModel(CyanticModel):
@@ -119,27 +119,27 @@ def test_cast_build():
 
     # Test normal distribution cast - verify only size and type
     cast_dict = {"values": {"mean": 0.0, "std_dev": 1.0, "size": 10}}
-    model2 = DataContainer.model_validate(cast_dict)
+    model2 = DataContainer.build(cast_dict)
     assert len(model2.values) == 10
     assert isinstance(model2.values, Tensor)
     assert all(isinstance(x, float) for x in model2.values.data)
 
     # Test scalar blueprint - int scalar
     scalar_int = {"values": 5}
-    model3 = DataContainer.model_validate(scalar_int)
+    model3 = DataContainer.build(scalar_int)
     assert len(model3.values) == 1
     assert isinstance(model3.values, Tensor)
     assert model3.values.data == [5.0]
 
     # Test scalar blueprint - float scalar
     scalar_float = {"values": 3.14}
-    model4 = DataContainer.model_validate(scalar_float)
+    model4 = DataContainer.build(scalar_float)
     assert len(model4.values) == 1
     assert model4.values.data == [3.14]
 
     # Test validation error for missing required fields
     try:
-        DataContainer.model_validate({"values": {"mean": 0.0}})
+        DataContainer.build({"values": {"mean": 0.0}})
         assert False, "Should have raised ValueError"
     except ValueError:
         pass
@@ -177,7 +177,7 @@ def test_container_of_blueprints():
         ],
     }
 
-    model = TensorContainers.model_validate(container_data)
+    model = TensorContainers.build(container_data)
 
     # Test list container
     assert isinstance(model.list_tensors, list)
@@ -216,15 +216,13 @@ def test_container_of_blueprints():
     }
 
     try:
-        TensorContainers.model_validate(invalid_data)
+        TensorContainers.build(invalid_data)
         assert False, "Should have raised ValueError"
     except ValueError:
         pass
 
     # Test uniform distribution cast - verify size and types
-    model3 = DataContainer.model_validate(
-        {"values": {"low": -1.0, "high": 1.0, "size": 50}}
-    )
+    model3 = DataContainer.build({"values": {"low": -1.0, "high": 1.0, "size": 50}})
     assert len(model3.values) == 50
     assert isinstance(model3.values, Tensor)
     assert all(isinstance(x, float) for x in model3.values.data)
@@ -265,7 +263,7 @@ def test_nested_blueprint_models():
         },
     }
 
-    model = ComplexDataContainer.model_validate(nested_data)
+    model = ComplexDataContainer.build(nested_data)
 
     # Verify top level fields
     assert model.name == "test_complex"
@@ -290,7 +288,7 @@ def test_mixed_model_validation():
     }
 
     try:
-        ComplexDataContainer.model_validate(invalid_data)
+        ComplexDataContainer.build(invalid_data)
         assert False, "Should have raised ValueError for missing scale"
     except ValueError:
         pass
@@ -306,7 +304,7 @@ def test_mixed_model_validation():
     }
 
     try:
-        ComplexDataContainer.model_validate(invalid_data)
+        ComplexDataContainer.build(invalid_data)
         assert False, "Should have raised ValueError for negative size"
     except ValueError:
         pass
@@ -324,7 +322,7 @@ def test_blueprint_type_inference():
         },
     }
 
-    model = ComplexDataContainer.model_validate(mixed_data)
+    model = ComplexDataContainer.build(mixed_data)
 
     # Verify that different blueprints were correctly applied
     assert len(model.primary) == 100
@@ -339,64 +337,16 @@ def test_blueprint_type_inference():
     assert all(isinstance(x, float) for x in model.secondary.tensor.data)
 
 
-class TensorWrapper(CyanticModel):
-    """A simple CyanticModel that will be nested in a BaseModel."""
-
-    tensor: Tensor
-
-
-class ConfigWithTensor(BaseModel):
-    """A BaseModel that contains a CyanticModel."""
-
-    name: str
-    description: str | None = None
-    data: TensorWrapper
-
-
-def test_cyanticmodel_in_basemodel():
-    """Test a CyanticModel nested inside a regular Pydantic BaseModel."""
-    config_data = {
-        "name": "test_config",
-        "description": "Testing CyanticModel inside BaseModel",
-        "data": {"tensor": {"mean": 0.0, "std_dev": 1.0, "size": 50}},
-    }
-
-    model = ConfigWithTensor.model_validate(config_data)
-
-    # Verify BaseModel fields
-    assert model.name == "test_config"
-    assert model.description == "Testing CyanticModel inside BaseModel"
-
-    # Verify the nested CyanticModel types and sizes
-    assert isinstance(model.data.tensor, Tensor)
-    assert len(model.data.tensor) == 50
-    assert all(isinstance(x, float) for x in model.data.tensor.data)
-
-    # Test validation with invalid nested blueprint
-    invalid_data = {
-        "name": "test_invalid",
-        "data": {
-            "tensor": {
-                "mean": 0.0,
-                "std_dev": 1.0,
-                "size": -10,  # Invalid negative size
-            }
-        },
-    }
-
-    try:
-        ConfigWithTensor.model_validate(invalid_data)
-        assert False, "Should have raised ValueError for negative size"
-    except ValueError:
-        pass
-
-
 class ArbitraryClass:
     """A simple class for testing the Classifier blueprint."""
 
     def __init__(self, name: str, value: int):
         self.name = name
         self.value = value
+
+
+# Register classifier for ArbitraryClass
+classifier(ArbitraryClass)
 
 
 class ClassifierContainer(CyanticModel):
@@ -406,7 +356,7 @@ class ClassifierContainer(CyanticModel):
 
 
 def test_classifier_blueprint():
-    """Test the Classifier blueprint registered for object type."""
+    """Test the Classifier blueprint with explicit registration."""
     data = {
         "obj": {
             "cls": "core_test.ArbitraryClass",  # Use pytest's relative module path
@@ -414,7 +364,7 @@ def test_classifier_blueprint():
         }
     }
 
-    model = ClassifierContainer.model_validate(data)
+    model = ClassifierContainer.build(data)
     assert isinstance(model.obj, ArbitraryClass)
     assert model.obj.name == "test"
     assert model.obj.value == 42
