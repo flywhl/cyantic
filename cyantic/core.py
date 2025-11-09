@@ -155,20 +155,6 @@ class CyanticModel(BaseModel):
         """Build a model instance from config using external build system."""
         return build(cls, config)
 
-    @classmethod
-    def model_validate(cls, obj: Any, **kwargs) -> Self:
-        """Override to use construct instead of validation for already-built objects."""
-        # If obj is a dict with built objects, use model_construct to skip validation
-        if isinstance(obj, dict):
-            # Check if values are already built (not dicts)
-            has_built_objects = any(
-                not isinstance(v, (dict, list, str, int, float, bool, type(None)))
-                for v in obj.values()
-            )
-            if has_built_objects:
-                return cls.model_construct(**obj)
-        return super().model_validate(obj, **kwargs)
-
 
 class Blueprint(BaseModel, Generic[T]):
     """Base class for parameter specifications that can be built into instances."""

@@ -102,11 +102,11 @@ def test_simple_build_with_call_hook():
     """Test basic build with @call: hook referencing sibling field."""
     config = {
         "network": {
-            "cls": "tests.unit.external_build_test.Network",
+            "cls": f"{__name__}.Network",
             "kwargs": {},
         },
         "optimizer": {
-            "cls": "tests.unit.external_build_test.Adam",
+            "cls": f"{__name__}.Adam",
             "kwargs": {"params": "@call:network.parameters"},
         },
     }
@@ -125,18 +125,18 @@ def test_nested_models_with_full_path_references():
     config = {
         "services": {
             "database": {
-                "cls": "tests.unit.external_build_test.Database",
+                "cls": f"{__name__}.Database",
                 "kwargs": {"host": "prod-db.example.com"},
             },
             "cache": {
-                "cls": "tests.unit.external_build_test.Cache",
+                "cls": f"{__name__}.Cache",
                 "kwargs": {
                     "db_connection": "@call:services.database.get_connection_string"
                 },
             },
         },
         "monitor": {
-            "cls": "tests.unit.external_build_test.Monitor",
+            "cls": f"{__name__}.Monitor",
             "kwargs": {"cache_ref": "@asset:services"},
         },
     }
@@ -166,16 +166,16 @@ def test_asset_hook():
     config = {
         "services": {
             "database": {
-                "cls": "tests.unit.external_build_test.Database",
+                "cls": f"{__name__}.Database",
                 "kwargs": {"host": "localhost"},
             },
             "cache": {
-                "cls": "tests.unit.external_build_test.Cache",
+                "cls": f"{__name__}.Cache",
                 "kwargs": {"db_connection": "@asset:services.database"},
             },
         },
         "monitor": {
-            "cls": "tests.unit.external_build_test.Monitor",
+            "cls": f"{__name__}.Monitor",
             "kwargs": {},
         },
     }
@@ -195,7 +195,7 @@ def test_import_hook():
         model_config = {"arbitrary_types_allowed": True}
 
     config = {
-        "optimizer_class": "@import:tests.unit.external_build_test.Adam",
+        "optimizer_class": f"@import:{__name__}.Adam",
     }
 
     result = Container.build(config)
@@ -225,16 +225,16 @@ def test_missing_asset_error():
     config = {
         "services": {
             "database": {
-                "cls": "tests.unit.external_build_test.Database",
+                "cls": f"{__name__}.Database",
                 "kwargs": {},
             },
             "cache": {
-                "cls": "tests.unit.external_build_test.Cache",
+                "cls": f"{__name__}.Cache",
                 "kwargs": {"db_connection": "@asset:nonexistent"},
             },
         },
         "monitor": {
-            "cls": "tests.unit.external_build_test.Monitor",
+            "cls": f"{__name__}.Monitor",
             "kwargs": {},
         },
     }
@@ -247,11 +247,11 @@ def test_missing_call_target_error():
     """Test that missing call targets raise clear errors."""
     config = {
         "network": {
-            "cls": "tests.unit.external_build_test.Network",
+            "cls": f"{__name__}.Network",
             "kwargs": {},
         },
         "optimizer": {
-            "cls": "tests.unit.external_build_test.Adam",
+            "cls": f"{__name__}.Adam",
             "kwargs": {"params": "@call:nonexistent.method"},
         },
     }
@@ -301,11 +301,11 @@ def test_progressive_prefix_matching():
     config = {
         "services": {
             "database": {
-                "cls": "tests.unit.external_build_test.Database",
+                "cls": f"{__name__}.Database",
                 "kwargs": {"host": "example.com"},
             },
             "cache": {
-                "cls": "tests.unit.external_build_test.Cache",
+                "cls": f"{__name__}.Cache",
                 "kwargs": {
                     # This should match 'services.database', not 'services'
                     "db_connection": "@call:services.database.get_connection_string"
@@ -313,7 +313,7 @@ def test_progressive_prefix_matching():
             },
         },
         "monitor": {
-            "cls": "tests.unit.external_build_test.Monitor",
+            "cls": f"{__name__}.Monitor",
             "kwargs": {},
         },
     }
