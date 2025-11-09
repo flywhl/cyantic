@@ -21,7 +21,8 @@ from .hooks import HOOK_PREFIX, HookRegistry
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T", bound=BaseModel)
+T = TypeVar("T")
+CyanticModelT = TypeVar("CyanticModelT", bound="CyanticModel")
 
 
 class BlueprintRegistry:
@@ -93,7 +94,7 @@ class CyanticModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=False)
 
     @classmethod
-    def build(cls: Type[T], config: dict) -> T:
+    def build(cls: Type[Self], config: dict) -> Self:
         """Build a model instance from config using external build system."""
         return build(cls, config)
 
@@ -533,7 +534,7 @@ def assemble_nested_dict(
     return result
 
 
-def build(target_type: Type[T], config: dict) -> T:
+def build(target_type: Type[CyanticModelT], config: dict) -> CyanticModelT:
     """Build a model instance from config using external build system.
 
     Args:

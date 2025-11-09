@@ -2,7 +2,7 @@ import os
 import random
 import statistics
 from typing import Any, Sequence, Union, overload
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from cyantic import Blueprint, blueprint, CyanticModel
 
