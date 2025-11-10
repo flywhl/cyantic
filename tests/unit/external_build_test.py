@@ -322,3 +322,40 @@ def test_progressive_prefix_matching():
 
     # The connection string should be the result of calling the method
     assert result.services.cache.db_connection == "postgres://example.com/db"
+
+
+def test_hook_returns_dict_for_cyanticmodel():
+    """Test that hooks work when a CyanticModel node's entire config is a hook string.
+
+    This tests the fix for: when config is "@hook:path" (not a dict),
+    process_hooks must be called before the CyanticModel assembly logic.
+    """
+    from cyantic.hooks import hook
+
+    @hook("getdbconfig")
+    def get_db_config_hook(path, built_assets, root_data, current_path=""):
+        """Hook that returns a dict suitable for Database classifier."""
+        return {
+            "cls": f"{__name__}.Database",
+            "kwargs": {"host": f"loaded-from-{path}"},
+        }
+
+    class Container(CyanticModel):
+        database: Database
+
+        model_config = {"arbitrary_types_allowed": True}
+
+    # Test: database config is a hook string that returns classifier dict
+    config = {
+        "database": "@getdbconfig:config/database.yaml",
+    }
+
+    result = Container.build(config)
+
+    # Check that the hook-provided config was used
+    assert result.database.host == "loaded-from-config/database.yaml"
+    assert type(result.database).__name__ == "Database"
+
+    # Clean up
+    from cyantic.hooks import HookRegistry
+    del HookRegistry._hooks["getdbconfig"]

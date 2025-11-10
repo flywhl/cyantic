@@ -19,6 +19,45 @@ from pydantic import BaseModel, ConfigDict
 
 from .hooks import HOOK_PREFIX, HookRegistry
 
+
+def process_before_hooks(config: Any, root_data: dict[str, Any]) -> Any:
+    """Process only 'before' hooks (those that should run before discovery).
+
+    This allows hooks like @include:, @value:, @env: to expand config
+    before we discover buildable nodes.
+
+    Args:
+        config: Config value (can be dict, list, string, etc.)
+        root_data: Original config dict for @value: references
+
+    Returns:
+        Config with before-hooks replaced by their resolved values
+    """
+    if isinstance(config, str) and config.startswith(HOOK_PREFIX):
+        hook_name, hook_path = config[1:].split(":", 1)
+
+        # Only process if this is a "before" hook
+        if HookRegistry.has(hook_name) and HookRegistry.is_before_hook(hook_name):
+            hook_handler = HookRegistry.get(hook_name)
+            # Before hooks don't have built_assets yet
+            return hook_handler(hook_path, {}, root_data, "")
+
+        # If it's an "after" hook, leave it as-is for later processing
+        return config
+
+    elif isinstance(config, dict):
+        return {k: process_before_hooks(v, root_data) for k, v in config.items()}
+
+    elif isinstance(config, list):
+        return [process_before_hooks(item, root_data) for item in config]
+
+    elif isinstance(config, tuple):
+        return tuple(process_before_hooks(item, root_data) for item in config)
+
+    else:
+        return config
+
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -637,6 +676,10 @@ def build_node(
     Returns:
         The built object
     """
+    # Process hooks on the config FIRST, before any type-specific logic
+    # This handles cases like: population: "@include:spec/population.yaml"
+    processed_config = process_hooks(node.config, built_assets, root_data, node.path)
+
     raw_type = (
         node.target_type.__origin__
         if hasattr(node.target_type, "__origin__")
@@ -645,40 +688,42 @@ def build_node(
 
     # Special case: if this is a CyanticModel, assemble from children
     if isinstance(raw_type, type) and issubclass(raw_type, CyanticModel):
-        # Find children nodes (nodes whose parent_path is this node's path)
-        children = [n for n in all_nodes if n.parent_path == node.path]
+        # Only use CyanticModel assembly logic if processed_config is a dict
+        # If it's not a dict (e.g., already a built object), fall through to normal handling
+        if isinstance(processed_config, dict):
+            # Find children nodes (nodes whose parent_path is this node's path)
+            children = [n for n in all_nodes if n.parent_path == node.path]
 
-        # Build dict from built children, reconstructing containers
-        assembled = {}
-        built_field_names = set()
+            # Build dict from built children, reconstructing containers
+            assembled = {}
+            built_field_names = set()
 
-        for child in children:
-            # Get relative path from this node to the child
-            path_parts = child.path.split(".")
-            parent_parts = node.path.split(".") if node.path else []
-            relative_parts = (
-                path_parts[len(parent_parts) :] if parent_parts else path_parts
-            )
-
-            if len(relative_parts) == 1:
-                # Direct child - simple assignment
-                assembled[relative_parts[0]] = built_assets[child.path]
-                built_field_names.add(relative_parts[0])
-            else:
-                # Nested child - need to recursively reconstruct container structure
-                reconstruct_nested_value(
-                    relative_parts,
-                    built_assets[child.path],
-                    node.config,
-                    assembled,
+            for child in children:
+                # Get relative path from this node to the child
+                path_parts = child.path.split(".")
+                parent_parts = node.path.split(".") if node.path else []
+                relative_parts = (
+                    path_parts[len(parent_parts) :] if parent_parts else path_parts
                 )
-                built_field_names.add(relative_parts[0])
 
-        # Also include non-built fields from config (primitives, etc.)
-        if isinstance(node.config, dict):
-            for field_name, field_value in node.config.items():
+                if len(relative_parts) == 1:
+                    # Direct child - simple assignment
+                    assembled[relative_parts[0]] = built_assets[child.path]
+                    built_field_names.add(relative_parts[0])
+                else:
+                    # Nested child - need to recursively reconstruct container structure
+                    reconstruct_nested_value(
+                        relative_parts,
+                        built_assets[child.path],
+                        processed_config,  # Use processed_config, not node.config
+                        assembled,
+                    )
+                    built_field_names.add(relative_parts[0])
+
+            # Also include non-built fields from processed_config (primitives, etc.)
+            for field_name, field_value in processed_config.items():
                 if field_name not in built_field_names:
-                    # Process hooks in non-built fields
+                    # Already processed hooks above, but need to process nested hooks
                     assembled[field_name] = process_hooks(
                         field_value,
                         built_assets,
@@ -686,15 +731,15 @@ def build_node(
                         f"{node.path}.{field_name}",
                     )
 
-        # Validate with the model
-        result = raw_type.model_validate(assembled)
-        logger.debug(
-            f"Built {node.path} (CyanticModel) from {len(children)} children and {len(assembled) - len(children)} non-built fields"
-        )
-        return result
+            # Validate with the model
+            result = raw_type.model_validate(assembled)
+            logger.debug(
+                f"Built {node.path} (CyanticModel) from {len(children)} children and {len(assembled) - len(children)} non-built fields"
+            )
+            return result
+        # If not a dict, fall through to normal handling below
 
-    # For non-CyanticModel nodes, process hooks and build normally
-    processed_config = process_hooks(node.config, built_assets, root_data, node.path)
+    # For non-CyanticModel nodes (or CyanticModel with non-dict config), use processed_config
 
     # If after processing hooks, the config is already the correct type, just return it
     try:
@@ -783,6 +828,11 @@ def build(target_type: Type[CyanticModelT], config: dict) -> CyanticModelT:
 
     # Keep reference to original config as root_data for @value: hooks
     root_data = config
+
+    # 0. Process "before" hooks (@include, @value, @env, etc.) BEFORE discovery
+    #    This expands config so buildable nodes inside @include: are discovered
+    config = process_before_hooks(config, root_data)
+    logger.debug("Processed before-hooks, expanded config")
 
     # 1. Discover all buildable nodes
     nodes = discover_buildable_nodes(config, target_type)

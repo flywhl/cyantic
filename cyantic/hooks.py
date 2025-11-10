@@ -1,13 +1,16 @@
 """Hook system for Cyantic external build.
 
-Hooks allow references in config like @import:, @env:, @value:, @asset:, @call:
+Hooks allow references in config like @import:, @env:, @value:, @asset:, @call:, @include:
 to be resolved during the build process.
 """
 
 import importlib
 import logging
 import os
+from pathlib import Path
 from typing import Any, Callable
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +21,24 @@ class HookRegistry:
     """Global registry for hooks."""
 
     _hooks: dict[str, Callable] = {}
+    _before_hooks: set[str] = set()  # Hooks that should be processed before discovery
 
     @classmethod
-    def register(cls, name: str, handler: Callable):
-        """Register a hook handler function."""
+    def register(cls, name: str, handler: Callable, before: bool = False):
+        """Register a hook handler function.
+
+        Args:
+            name: Hook name (without @ prefix)
+            handler: Hook handler function
+            before: If True, process this hook before discovery (e.g., @include, @value, @env)
+                   If False, process after building (e.g., @asset, @call)
+        """
         if name in cls._hooks:
             raise ValueError(f"Hook already registered: {name}")
         cls._hooks[name] = handler
-        logger.debug(f"Registered hook: {name}")
+        if before:
+            cls._before_hooks.add(name)
+        logger.debug(f"Registered hook: {name} (before={before})")
 
     @classmethod
     def get(cls, name: str) -> Callable:
@@ -40,22 +53,33 @@ class HookRegistry:
         return name in cls._hooks
 
     @classmethod
+    def is_before_hook(cls, name: str) -> bool:
+        """Check if a hook should be processed before discovery."""
+        return name in cls._before_hooks
+
+    @classmethod
     def clear(cls):
         """Clear all registered hooks."""
         cls._hooks.clear()
+        cls._before_hooks.clear()
 
 
-def hook(name: str):
+def hook(name: str, before: bool = False):
     """Decorator to register a hook handler function.
 
+    Args:
+        name: Hook name (without @ prefix)
+        before: If True, this hook is processed before discovery (e.g., @include, @value, @env)
+               If False, this hook is processed during/after building (e.g., @asset, @call)
+
     Example:
-        @hook("myvalue")
-        def my_custom_hook(path: str, built_assets: dict, root_data: dict, current_path: str = "") -> Any:
-            return root_data.get(path)
+        @hook("include", before=True)
+        def include_hook(path: str, built_assets: dict, root_data: dict, current_path: str = "") -> Any:
+            return load_yaml(path)
     """
 
     def decorator(handler: Callable):
-        HookRegistry.register(name, handler)
+        HookRegistry.register(name, handler, before=before)
         return handler
 
     return decorator
@@ -101,7 +125,7 @@ def navigate_path(obj: Any, path: str) -> Any:
 # Built-in hooks
 
 
-@hook("import")
+@hook("import", before=True)  # Process before discovery so imported types are available
 def import_hook(
     path: str,
     built_assets: dict[str, Any],
@@ -120,7 +144,7 @@ def import_hook(
     return getattr(module, attr)
 
 
-@hook("env")
+@hook("env", before=True)  # Process before discovery so env values are available
 def env_hook(
     path: str,
     built_assets: dict[str, Any],
@@ -137,7 +161,7 @@ def env_hook(
         raise ValueError(f"Environment variable {path} not found") from e
 
 
-@hook("value")
+@hook("value", before=True)  # Process before discovery so values can be expanded
 def value_hook(
     path: str,
     built_assets: dict[str, Any],
@@ -151,7 +175,55 @@ def value_hook(
     return navigate_path(root_data, path)
 
 
-@hook("asset")
+@hook(
+    "include", before=True
+)  # Process before discovery so included config is discovered
+def include_hook(
+    path: str,
+    built_assets: dict[str, Any],
+    root_data: dict[str, Any],
+    current_path: str = "",
+) -> dict[str, Any]:
+    """Include and parse a YAML file, returning its contents as a dict.
+
+    Usage in YAML:
+        some_field: "@include:path/to/file.yaml"
+
+    Args:
+        path: Path to the YAML file to include (relative to current working directory)
+        built_assets: Dictionary of already-built assets
+        root_data: Original root configuration data
+        current_path: Path of the current node being built
+
+    Returns:
+        The parsed YAML file contents as a dictionary
+
+    Raises:
+        FileNotFoundError: If the YAML file doesn't exist
+        yaml.YAMLError: If the YAML file is malformed
+    """
+    file_path = Path(path)
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"Include file not found: {path}")
+
+    try:
+        with open(file_path) as f:
+            content = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise ValueError(f"Failed to parse YAML file {path}: {e}")
+
+    if not isinstance(content, dict):
+        raise ValueError(
+            f"Include file {path} must contain a YAML dict at the top level, "
+            f"got {type(content).__name__}"
+        )
+
+    logger.debug(f"@include:{path} loaded with keys: {list(content.keys())}")
+    return content
+
+
+@hook("asset", before=False)  # Process after building since it references built objects
 def asset_hook(
     path: str,
     built_assets: dict[str, Any],
@@ -170,7 +242,7 @@ def asset_hook(
     return built_assets[path]
 
 
-@hook("call")
+@hook("call", before=False)  # Process after building since it references built objects
 def call_hook(
     path: str,
     built_assets: dict[str, Any],
