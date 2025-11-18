@@ -324,6 +324,13 @@ def discover_buildable_nodes(
                     if field_name not in config:
                         continue
 
+                    # Skip private attributes (PrivateAttr fields)
+                    if (
+                        hasattr(raw_type, "__private_attributes__")
+                        and field_name in raw_type.__private_attributes__
+                    ):
+                        continue
+
                     field_config = config[field_name]
                     field_path = f"{path}.{field_name}" if path else field_name
 

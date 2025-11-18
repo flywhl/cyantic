@@ -6,7 +6,8 @@
       "Bash(just test:*)",
       "Bash(pytest:*)",
       "Bash(uv run pytest:*)",
-      "Bash(just pyright:*)"
+      "Bash(just pyright:*)",
+      "Bash(just fix)"
     ],
     "deny": []
   }

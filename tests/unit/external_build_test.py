@@ -358,4 +358,5 @@ def test_hook_returns_dict_for_cyanticmodel():
 
     # Clean up
     from cyantic.hooks import HookRegistry
+
     del HookRegistry._hooks["getdbconfig"]
