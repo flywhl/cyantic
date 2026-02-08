@@ -313,11 +313,22 @@ def discover_buildable_nodes(
         try:
             if issubclass(raw_type, BaseModel):
                 try:
-                    hints = get_type_hints(raw_type)
-                except NameError:
-                    # Forward reference that can't be resolved (e.g., self-referential types
-                    # defined in local scope). Skip field discovery for this type.
+                    hints = get_type_hints(raw_type, include_extras=True)
+                except NameError as e:
+                    # get_type_hints failed, likely due to undefined types in annotations.
+                    # Since Pydantic pre-resolves type annotations for model fields,
+                    # we can use those directly. They're already resolved for all
+                    # public fields, which is what we care about.
+                    logger.debug(
+                        f"NameError in get_type_hints for {raw_type.__name__}: {e}. "
+                        f"Using pre-resolved annotations from model_fields."
+                    )
+
                     hints = {}
+                    # Use Pydantic's pre-resolved type annotations
+                    for field_name, field_info in raw_type.model_fields.items():
+                        if field_info.annotation is not None:
+                            hints[field_name] = field_info.annotation
 
                 # Discover buildable fields recursively
                 for field_name, field_type in hints.items():
@@ -693,6 +704,25 @@ def build_node(
         else node.target_type
     )
 
+    # Check for blueprints first, before CyanticModel assembly
+    # This allows classifier blueprints to work for CyanticModel subclasses
+    blueprints = BlueprintRegistry.get_blueprints(raw_type)
+    if blueprints and isinstance(processed_config, dict):
+        # Try each blueprint
+        for blueprint_type in blueprints:
+            try:
+                blueprint = blueprint_type.model_validate(processed_config)
+                result = blueprint.build()
+                logger.debug(
+                    f"Built {node.path} using blueprint {blueprint_type.__name__}"
+                )
+                return result
+            except Exception as e:
+                logger.debug(f"Blueprint {blueprint_type.__name__} failed: {e}")
+                continue
+
+        # If we get here, no blueprints worked, so fall through to CyanticModel assembly
+
     # Special case: if this is a CyanticModel, assemble from children
     if isinstance(raw_type, type) and issubclass(raw_type, CyanticModel):
         # Only use CyanticModel assembly logic if processed_config is a dict
@@ -757,17 +787,15 @@ def build_node(
         # raw_type might not be valid for isinstance check
         pass
 
-    # Try blueprints first
+    # Try blueprints for non-dict configs (e.g., scalar values)
     blueprints = BlueprintRegistry.get_blueprints(raw_type)
-    if blueprints:
-        # If config is not a dict, try wrapping it as {"value": config} for scalar blueprints
-        if not isinstance(processed_config, dict):
-            processed_config = {"value": processed_config}
+    if blueprints and not isinstance(processed_config, dict):
+        # For scalar configs, try wrapping as {"value": config}
+        wrapped_config = {"value": processed_config}
 
-        # Try each blueprint
         for blueprint_type in blueprints:
             try:
-                blueprint = blueprint_type.model_validate(processed_config)
+                blueprint = blueprint_type.model_validate(wrapped_config)
                 result = blueprint.build()
                 logger.debug(
                     f"Built {node.path} using blueprint {blueprint_type.__name__}"
@@ -840,6 +868,22 @@ def build(target_type: Type[CyanticModelT], config: dict) -> CyanticModelT:
     #    This expands config so buildable nodes inside @include: are discovered
     config = process_before_hooks(config, root_data)
     logger.debug("Processed before-hooks, expanded config")
+
+    # 0.5. Check if this is actually a blueprint config (e.g., classifier)
+    #      This handles direct calls like Animal.build({"cls": "...", "kwargs": {...}})
+    blueprints = BlueprintRegistry.get_blueprints(target_type)
+    if blueprints and isinstance(config, dict):
+        for blueprint_type in blueprints:
+            try:
+                blueprint = blueprint_type.model_validate(config)
+                result = blueprint.build()
+                logger.debug(
+                    f"Built {target_type.__name__} directly using blueprint {blueprint_type.__name__}"
+                )
+                return result
+            except Exception as e:
+                logger.debug(f"Blueprint {blueprint_type.__name__} failed: {e}")
+                continue
 
     # 1. Discover all buildable nodes
     nodes = discover_buildable_nodes(config, target_type)
