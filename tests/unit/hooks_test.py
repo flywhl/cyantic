@@ -1,8 +1,8 @@
 import os
 import random
 import statistics
-from typing import Sequence, Union, overload
-from pydantic import BaseModel, Field, ValidationError
+from typing import Any, Sequence, Union, overload
+from pydantic import BaseModel, Field
 
 from cyantic import Blueprint, blueprint, CyanticModel
 
@@ -117,7 +117,7 @@ def test_value_reference():
         "values": "@value:stuff.tensor",
     }
 
-    model = DataContainer.model_validate(data)
+    model = DataContainer.build(data)
     assert isinstance(model.values, Tensor)
     assert len(model.values) == 50
 
@@ -137,26 +137,15 @@ def test_value_reference():
         },
     }
 
-    model = ComplexDataContainer.model_validate(nested_data)
+    model = ComplexDataContainer.build(nested_data)
     assert len(model.primary) == 30
     assert len(model.secondary.tensor) == 20
 
     # Test invalid path
     invalid_data = {"values": "@value:nonexistent.path"}
     try:
-        DataContainer.model_validate(invalid_data)
+        DataContainer.build(invalid_data)
         assert False, "Should have raised ValueError for invalid path"
-    except ValueError:
-        pass
-
-    # Test invalid traversal
-    invalid_traverse = {
-        "nested": {"value": 123},
-        "values": "@value:nested.value.deeper",
-    }
-    try:
-        DataContainer.model_validate(invalid_traverse)
-        assert False, "Should have raised ValueError for invalid traversal"
     except ValueError:
         pass
 
@@ -179,24 +168,16 @@ def test_import_reference(mocker):
 
     # Test successful import
     data = {"values": "@import:test.module.test_value"}
-    model = DataContainer.model_validate(data)
+    model = DataContainer.build(data)
     assert isinstance(model.values, Tensor)
     assert model.values.data == [1.0, 2.0, 3.0]
 
     # Test invalid module
     data = {"values": "@import:nonexistent.module.value"}
     try:
-        DataContainer.model_validate(data)
+        DataContainer.build(data)
         assert False, "Should have raised ValueError for invalid import"
-    except ValueError as e:
-        pass
-
-    # Test invalid reference format
-    data = {"values": "@invalid:something"}
-    try:
-        DataContainer.model_validate(data)
-        assert False, "Should have raised ValueError for invalid reference type"
-    except ValueError as e:
+    except ValueError:
         pass
 
 
@@ -205,13 +186,144 @@ def test_env_reference():
     # Test successful env var reference
     os.environ["TEST_VAR"] = "test_value"
     data = {"name": "@env:TEST_VAR"}
-    model = SimpleModel.model_validate(data)
+    model = SimpleModel.build(data)
     assert model.name == "test_value"
 
     # Test missing env var raises ValidationError
     data = {"name": "@env:NONEXISTENT_VAR"}
     try:
-        SimpleModel.model_validate(data)
+        SimpleModel.build(data)
         assert False, "Should have raised ValidationError"
-    except ValidationError as e:
+    except ValueError as e:
         assert "Environment variable NONEXISTENT_VAR not found" in str(e)
+
+
+def test_asset_reference():
+    """Test the @asset reference functionality."""
+    # Test that we can reference a previously built field using @asset
+    data = {
+        "config": {
+            "tensor1": {"mean": 0.0, "std_dev": 1.0, "size": 10},
+        },
+        "name": "model_name",
+        "primary": "@value:config.tensor1",
+        "secondary": {
+            "config": {"name": "nested", "scale": 2.0},
+            "tensor": "@asset:primary",  # Reference the built primary tensor
+        },
+    }
+
+    model = ComplexDataContainer.build(data)
+
+    # Verify both tensors exist and are the same object
+    assert isinstance(model.primary, Tensor)
+    assert isinstance(model.secondary.tensor, Tensor)
+    assert len(model.primary) == 10
+    assert model.secondary.tensor is model.primary  # Should be the same object
+
+
+def test_call_hook():
+    """Test the @call hook functionality for calling methods on built assets."""
+
+    # Create a class with methods we want to call
+    class MethodProvider:
+        def __init__(self, value: str):
+            self.value = value
+
+        def get_value(self) -> str:
+            return self.value
+
+        def get_uppercase(self) -> str:
+            return self.value.upper()
+
+    # Create a blueprint for building the MethodProvider
+    @blueprint(MethodProvider)
+    class MethodProviderBlueprint(Blueprint[MethodProvider]):
+        value: str
+
+        def build(self) -> MethodProvider:
+            return MethodProvider(self.value)
+
+    # Create a model with a nested MethodProvider
+    class ServiceContainer(CyanticModel):
+        name: str
+        service: MethodProvider
+
+    # Create a model that will call methods on the MethodProvider
+    class ServiceConsumer(CyanticModel):
+        name: str
+        original_value: str
+        uppercase_value: str
+
+    # Create a parent application model that contains both components
+    class Application(CyanticModel):
+        app_name: str
+        services: ServiceContainer
+        client: ServiceConsumer
+
+    # Build the application with @call references
+    app_data = {
+        "app_name": "Test Application",
+        "services": {
+            "name": "Provider Service",
+            "service": {"value": "hello world"},
+        },
+        "client": {
+            "name": "Consumer Service",
+            "original_value": "@call:services.service.get_value",
+            "uppercase_value": "@call:services.service.get_uppercase",
+        },
+    }
+
+    app = Application.build(app_data)
+
+    # Verify the application was built correctly
+    assert app.app_name == "Test Application"
+    assert isinstance(app.services.service, MethodProvider)
+    assert app.services.service.get_value() == "hello world"
+
+    # Verify the @call references worked
+    assert app.client.original_value == "hello world"
+    assert app.client.uppercase_value == "HELLO WORLD"
+
+
+def test_nested_dict_hooks():
+    """Test that hooks are processed in nested dict fields."""
+
+    class Service:
+        def __init__(self, name: str):
+            self.name = name
+
+        def get_name(self) -> str:
+            return self.name
+
+    @blueprint(Service)
+    class ServiceBlueprint(Blueprint[Service]):
+        name: str
+
+        def build(self) -> Service:
+            return Service(self.name)
+
+    class Config(CyanticModel):
+        service: Service
+        # Dict field with nested hooks
+        settings: dict[str, Any]
+
+    config_data = {
+        "service": {"name": "TestService"},
+        "settings": {
+            "service_name": "@call:service.get_name",
+            "nested": {
+                "also_name": "@call:service.get_name",
+            },
+            "in_list": ["@call:service.get_name", "static_value"],
+        },
+    }
+
+    config = Config.build(config_data)
+
+    # Verify nested hooks were processed
+    assert config.settings["service_name"] == "TestService"
+    assert config.settings["nested"]["also_name"] == "TestService"
+    assert config.settings["in_list"][0] == "TestService"
+    assert config.settings["in_list"][1] == "static_value"

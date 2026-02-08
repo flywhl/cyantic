@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(just test-s:*)",
+      "Bash(just test:*)",
+      "Bash(pytest:*)",
+      "Bash(uv run pytest:*)",
+      "Bash(just pyright:*)",
+      "Bash(just fix)"
+    ],
+    "deny": []
+  }
+}

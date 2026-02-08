@@ -7,19 +7,16 @@ test:
 test-s:
     @uv run pytest -s -o log_cli=True -o log_cli_level=DEBUG
 
-ruff-fix:
-    uv run ruff format cyantic
+fix dir=".":
+    uv run ruff format {{dir}}
 
-ruff-check:
-    uv run ruff check cyantic
+ruff dir=".":
+    uv run ruff check {{dir}}
 
-pyright:
-    uv run pyright cyantic
+pyright dir=".":
+    uv run pyright {{dir}}
 
-lint:
-    just ruff-check
-    just pyright
+lint dir=".":
+    just ruff {{dir}}
+    just pyright {{dir}}
 
-lint-file file:
-    - ruff {{file}}
-    - pyright {{file}}
